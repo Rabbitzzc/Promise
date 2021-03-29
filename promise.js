@@ -1,144 +1,175 @@
 class PPromise {
+    // 默认状态
+    status = 'pending'
+    value = undefined // resolve 的值
     callbacks = []
-    state = 'pending'
-    value = null
-
     constructor(fn) {
         try {
+            // 默认会立即执行 - 接收两个参数，一个是 resolve 一个是 reject
             fn(this._resolve.bind(this), this._reject.bind(this))
         } catch (error) {
             this._reject(error)
         }
     }
-
+    // * 而异步的方法是存在问题，这里 then 里面保存了下一个 promise 的 resolve 方法，继续执行 callbacks，但是异步情况下，_resolve 方法中 fn 执行以后，仅仅执行了，没有使用下一个 promise 的 resolve 通知执行，也就是链断了
     then(onFulfilled, onRejected) {
-        const Prototype = this.constructor
-        return new Prototype((resolve, reject) => {
-            this._handle({
-                onFulfilled: onFulfilled || null,
-                onRejected: onRejected || null,
+        return new PPromise((resolve, reject) => {
+            // 注册所有函数
+            this._handler({
                 resolve,
-                reject
+                reject,
+                onFulfilled: onFulfilled || null,
+                onRejected: onRejected || null
             })
-
         })
     }
-
     catch (onRejected) {
         return this.then(null, onRejected)
-    } finally(done) {
-        // finally 与 catch 类似，也是 then 的变形，即 then 中的 onFulfilled = onRejected = done，这么做的话，不符合 promise 规范
-        // return this.then(done, done)
-
-        // finally 中没有任何状态，需要对 done 方法重新封装一层
-        if (typeof (done) !== 'function') return this.then()
-        const Prototype = this.constructor
+    }
+    // finally 函数
+    finally(done) {
+        // promise 只有 then，catch 与 finally 都是变形
+        // return this.then(done,done) // 不管之前的状态，都会执行，所以都注册即可，但是还是存在状态
+        if (typeof done !== 'function') return this.then()
+        // finally 跟状态无关的，且没有参数
+        // resolve 则执行完，返回新的新的 promise，且为 resolve 的 value
+        // reject 执行完，则会返回新的 promise，且抛出错误
         return this.then(
-            value => Prototype._resolve(done()).then(() => value),
-            error => Prototype._resolve(done()).then(() => {
+            value => PPromise._resolve(done()).then(() => value),
+            error => PPromise._resolve(done()).then(() => {
                 throw error
             })
         )
     }
+    _handler(callback) {
+        if (this.status === 'pending') {
+            return this.callbacks.push(callback)
+        }
+        // 判断函数执行
+        const on_resolve_reject = this.status === 'fulfilled' ? callback.onFulfilled : callback.onRejected
+        const resolve_reject = this.status === 'fulfilled' ? callback.resolve : callback.reject
+        // 如果 promise 的状态 resolved，则立即执行 - 解决 resolve 为同步问题 - 并返回函数执行返回值
+        //如果then中没有传递任何东西 - Promise 规范 - Promise.resolve(1).then().then(v=>console.log(v)) 接管then空之前的 resolve 数据 1
+        if (!on_resolve_reject) {
+            return resolve_reject(this.value)
+        }
+        try {
+            resolve_reject(on_resolve_reject(this.value))
+        } catch (error) {
+            callback.reject(error)
+        }
+    }
+    // 内部的 resolve 与 reject 函数
     _resolve(value) {
-        if (this.state !== 'pending') return
-        // 对 value 进行判断
+        if (this.status !== 'pending') return // 注意终止 resolve 与 reject 不可同时执行
+        // promise 链式是解决异步的，所以一般 value 都是新的 promise
+        // 如果是 promise，则返回 promise 的状态
         const {
             then
         } = value || {}
-        if (typeof (then) === 'function') {
-            // 让 promise 先执行一下，然后直接执行，让内部 promise.onfulFilled = 当前 promise._resolve
-            then.call(value, this._resolve.bind(this), this._reject.bind(this))
-            return
+        // 继续执行 promise 的异步 - 让 promise 先执行一下，然后直接执行，让内部 promise.onfulFilled = 当前 promise._resolve
+        if (typeof then === 'function') {
+            return then.call(value, this._resolve.bind(this), this._reject.bind(this))
         }
-
-        this.state = 'fulfilled'
+        this.status = 'fulfilled'
         this.value = value
-        this.callbacks.forEach(callbackObj => this._handle(callbackObj))
+        this.callbacks.forEach(v => this._handler(v))
     }
-
+    // 与 resolve 类似 - 但是不对属性进行判断
     _reject(error) {
-        if (this.state !== 'pending') return
-        this.state = 'rejected'
+        if (this.status !== 'pending') return // 注意终止 resolve 与 reject 不可同时执行
+        this.status = 'rejected'
         this.value = error
-        this.callbacks.forEach(callbackObj => this._handle(callbackObj))
+        this.callbacks.forEach(v => this._handler(v))
     }
-
-    _handle(callbackObj) {
-        if (this.state === 'pending') {
-            this.callbacks.push(callbackObj)
-            return
-        }
-
-        const cb = this.state === 'fulfilled' ? callbackObj.onFulfilled : callbackObj.onRejected
-        let pcb = this.state === 'fulfilled' ? callbackObj.resolve : callbackObj.reject
-
-        if (!cb) {
-            pcb(this.value)
-            return
-        }
-
-        try {
-            pcb(cb(this.value))
-        } catch (error) {
-            callbackObj.reject(error)
-        }
-    }
-
     static resolve(value) {
-        if (value) {
-            const {
-                then
-            } = value || {}
-            if (value instanceof PPromise) {
-                return value
-            } else if (typeof (then) === 'function') {
-                return new PPromise(resolve => then(resolve))
-            } else if (value) {
-                return new PPromise(resolve => resolve(value))
-            } else {
-                return new PPromise(resolve => resolve())
-            }
+        const {
+            then
+        } = value || {}
+        // Promise 返回新的 promise
+        // 存在 then 函数，则执行 then，且不处理 resolve
+        // 其他数据，直接返回 resolve
+        if (value instanceof PPromise) {
+            return value
+        } else if (typeof (then) === 'function') {
+            return new PPromise(resolve => then(resolve))
+        } else {
+            return new PPromise(resolve => resolve(value))
         }
     }
-
     static reject(value) {
         const {
             then
         } = value || {}
-        if (typeof (then) === 'function') {
-            return new PPromise((resolve, reject) => then(reject))
-        } else {
-            return new PPromise((resolve, reject) => reject(value))
-        }
+        if (typeof (then) === 'function') return new PPromise((resolve, reject) => then(reject))
+        return new PPromise((resolve, reject) => reject(value))
     }
-
     static all(promises) {
         return new PPromise((resolve, reject) => {
-            let fulfilledCount = 0
-            const length = promises.length
-            // 存储结果
-            const rets = Array.from({
+            let result = []
+            let resolveLength = 0
+            const {
                 length
-            })
+            } = promises
             promises.forEach((promise, index) => {
-                Promise.resolve(promise).then(result => {
-                    rets[index] = result
-
-                    if (++fulfilledCount === length) {
-                        resolve(rets)
+                PPromise.resolve(promise).then(v => {
+                    result[index] = v
+                    if (++resolveLength === length) {
+                        resolve(result)
                     }
-                }, error => reject(error))
+                }).catch(e => reject(e))
             })
         })
     }
 
-    // race 返回最先 resolve 的
+    // 任何一个出来结果即可
     static race(promises) {
         return new PPromise((resolve, reject) => {
-            promises.some(promise => {
-                // 直接去抢，谁先执行即可
-                Promise.resolve(promise).then(value => resolve(value), error => reject(error))
+            promises.some(promise => PPromise.resolve(promise).then(v => resolve(v)).catch(e => reject(e)))
+        })
+    }
+
+    // 任何一个 resolve 出来即可
+    static any(promises) {
+        return new PPromise((resolve, reject) => {
+            let resolveLength = 0
+            const {
+                length
+            } = promises
+            promises.forEach((promise, index) => {
+                PPromise.resolve(promise).then(v => {
+                    resolve(v)
+                }).catch(() => {
+                    if (++resolveLength === length) {
+                        reject(new Error('AggregateError: All promises were rejected'))
+                    }
+                })
+            })
+        })
+    }
+    static allSettled(promises) {
+        return new PPromise((resolve, reject) => {
+            let result = []
+            let resolveLength = 0
+            const {
+                length
+            } = promises
+            promises.forEach((promise, index) => {
+                PPromise.resolve(promise).then(v => {
+                    result[index] = {
+                        status: 'fulfilled',
+                        value: v
+                    }
+                }).catch(e => {
+                    result[index] = {
+                        status: 'rejected',
+                        value: e
+                    }
+                }).finally(() => {
+                    if (++resolveLength === length) {
+                        resolve(result)
+                    }
+                })
             })
         })
     }
